@@ -5,7 +5,7 @@ description: This skill should be used when the user asks to "send a Slack messa
 
 # Slack Integration Skill
 
-This skill provides workflows for interacting with Slack via a self-contained Python client. It supports four primary workflows: sending messages, reading notifications, generating activity digests, and retrieving sent message history.
+This skill provides workflows for interacting with Slack via a self-contained Python client. It supports multiple workspaces with contextual auto-selection, and four primary workflows: sending messages, reading notifications, generating activity digests, and retrieving sent message history.
 
 ## Setup
 
@@ -13,19 +13,24 @@ This skill provides workflows for interacting with Slack via a self-contained Py
 
 If `config.json` is missing when running a Slack command, walk the user through setup:
 
-1. **Create config files:**
+1. **Create config file:**
    ```bash
    cd ~/.claude/skills/slack
    cp config.example.json config.json
-   cp slack-cache.example.json slack-cache.json
    ```
 
-2. **Guide user to extract browser tokens** (see `references/setup-guide.md`):
-   - Open Slack in browser and log in
+2. **Guide user to extract browser tokens:**
+   - Open Slack in browser and log into the desired workspace
    - Open Developer Tools (F12 or Cmd+Option+I)
-   - Get `xoxc_token` from localStorage (Application → Local Storage → look for `xoxc-`)
-   - Get `xoxd_token` from cookies (Application → Cookies → cookie named `d`)
-   - Get `user_agent` from console: `navigator.userAgent`
+   - Get `xoxc_token` by running in Console tab:
+     ```javascript
+     JSON.parse(localStorage.localConfig_v2).teams[document.location.pathname.match(/^\/client\/([A-Z0-9]+)/)[1]].token
+     ```
+   - Get `xoxd_token` from Application tab:
+     - Go to **Application** > **Cookies** > **https://app.slack.com**
+     - Find the cookie named `d` and copy its value
+   - Get `user_agent` by running in Console tab: `navigator.userAgent`
+   - Note the workspace name from the URL (e.g., `hartreeworks` from `hartreeworks.slack.com`)
 
 3. **Ask for preferences using AskUserQuestion:**
    ```
@@ -39,52 +44,57 @@ If `config.json` is missing when running a Slack command, walk the user through 
    multiSelect: false
    ```
 
-4. **Write config.json with all values:**
-   ```json
-   {
-     "xoxc_token": "<user's token>",
-     "xoxd_token": "<user's token>",
-     "user_agent": "<user's user agent>",
-     "link_style": "browser" or "app"
-   }
+4. **Add the workspace using the CLI:**
+   ```bash
+   SCRIPT=~/.claude/skills/slack/scripts/slack_client.py
+   python3 $SCRIPT add-workspace "workspace-name" "xoxc-token" "xoxd-token" "user-agent"
    ```
 
 5. **Test the connection:**
    ```bash
-   python3 ~/.claude/skills/slack/scripts/slack_client.py auth
+   python3 $SCRIPT auth
    ```
+
+### Adding Additional Workspaces
+
+To add another workspace, repeat the token extraction for the new workspace and run:
+```bash
+python3 $SCRIPT add-workspace "new-workspace" "xoxc-token" "xoxd-token"
+```
+
+The `user_agent` is optional when adding subsequent workspaces (defaults to first workspace's value).
 
 ### Config File Structure
 
-`config.json` contains credentials and preferences:
+`config.json` supports multiple workspaces:
 
 ```json
 {
-  "xoxc_token": "xoxc-...",
-  "xoxd_token": "xoxd-...",
-  "user_agent": "Mozilla/5.0...",
+  "workspaces": {
+    "hartreeworks": {
+      "xoxc_token": "xoxc-...",
+      "xoxd_token": "xoxd-...",
+      "user_agent": "Mozilla/5.0..."
+    },
+    "another-workspace": {
+      "xoxc_token": "xoxc-...",
+      "xoxd_token": "xoxd-...",
+      "user_agent": "Mozilla/5.0..."
+    }
+  },
+  "default_workspace": "hartreeworks",
   "link_style": "app"
 }
 ```
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `xoxc_token` | Yes | Browser token from localStorage |
-| `xoxd_token` | Yes | Browser cookie token |
-| `user_agent` | Yes | Your browser's User-Agent string |
+| `workspaces` | Yes | Object keyed by workspace name |
+| `workspaces.*.xoxc_token` | Yes | Browser token from localStorage |
+| `workspaces.*.xoxd_token` | Yes | Browser cookie token |
+| `workspaces.*.user_agent` | Yes | Your browser's User-Agent string |
+| `default_workspace` | Yes | Fallback workspace when none specified |
 | `link_style` | Yes | `"app"` (native Slack) or `"browser"` (web browser) |
-
-### Manual Setup
-
-If setting up manually:
-
-```bash
-cd ~/.claude/skills/slack
-cp config.example.json config.json
-cp slack-cache.example.json slack-cache.json
-```
-
-Edit `config.json` with your tokens and preferences. Refer to `references/setup-guide.md` for token extraction.
 
 ### Test the Connection
 
@@ -94,7 +104,9 @@ python3 ~/.claude/skills/slack/scripts/slack_client.py auth
 
 ## Python Client Commands
 
-The `scripts/slack_client.py` script provides these commands:
+The `scripts/slack_client.py` script provides these commands. All commands support an optional `-w <workspace>` flag to specify the workspace.
+
+### Core Commands
 
 | Command | Arguments | Purpose |
 |---------|-----------|---------|
@@ -107,10 +119,27 @@ The `scripts/slack_client.py` script provides these commands:
 | `send` | channel_id text [thread_ts] | Send a message |
 | `permalink` | channel_id message_ts [workspace] | Get message permalink |
 
+### Workspace Management Commands
+
+| Command | Arguments | Purpose |
+|---------|-----------|---------|
+| `workspaces` | - | List configured workspaces |
+| `switch` | workspace_name | Set active workspace |
+| `add-workspace` | name xoxc xoxd [user_agent] | Add a new workspace |
+
 ### Example Usage
 
 ```bash
 SCRIPT=~/.claude/skills/slack/scripts/slack_client.py
+
+# List configured workspaces
+python3 $SCRIPT workspaces
+
+# Switch active workspace
+python3 $SCRIPT switch acme-corp
+
+# Use specific workspace for one command
+python3 $SCRIPT -w hartreeworks channels
 
 # List public channels
 python3 $SCRIPT channels "public_channel"
@@ -131,14 +160,53 @@ python3 $SCRIPT history "C0123456789" 20
 python3 $SCRIPT permalink "C0123456789" "1234567890.123456"
 ```
 
+## Workspace Selection
+
+The skill supports multiple workspaces with contextual auto-selection.
+
+### Selection Priority
+
+When a command runs without `-w`, the workspace is selected in this order:
+
+1. **Explicit flag**: `-w workspace-name` always wins
+2. **Channel context**: If operating on a channel known to belong to a workspace
+3. **Recent activity**: Active workspace from the last 10 minutes
+4. **Default workspace**: Configured in `config.json`
+5. **First workspace**: If nothing else matches
+
+### Handling Ambiguous Workspace
+
+When the workspace is ambiguous (e.g., user asks to "send a message to #general" but multiple workspaces have a #general channel), use AskUserQuestion:
+
+```
+question: "Which Slack workspace should I use?"
+header: "Workspace"
+options:
+  - label: "hartreeworks"
+    description: "hartreeworks.slack.com"
+  - label: "acme-corp"
+    description: "acme-corp.slack.com"
+multiSelect: false
+```
+
+Then pass the selected workspace using the `-w` flag.
+
+### Session State
+
+The skill tracks workspace context in `session-state.json`:
+- `active_workspace`: Most recently used workspace
+- `workspace_channel_map`: Maps channel IDs to their workspaces
+
+This enables automatic workspace inference when operating on previously-seen channels.
+
 ## Performance Cache
 
-A cache file (`slack-cache.json`) stores frequently-used IDs to reduce API calls.
+Each workspace has its own cache file (`slack-cache-{workspace}.json`) storing frequently-used IDs.
 
 ### Using the Cache
 
 Before making API calls to look up users or channels:
-1. Read `slack-cache.json` in this skill folder
+1. Read `slack-cache-{workspace}.json` for the current workspace
 2. Check if the needed ID is already cached
 3. If found, use the cached value directly
 4. If not found, make the API call, then update the cache
@@ -149,7 +217,7 @@ Before making API calls to look up users or channels:
 {
   "user": {"id": "...", "username": "...", "display_name": "..."},
   "self_dm_channel": "D...",
-  "workspace": "your-workspace",
+  "workspace": "hartreeworks",
   "frequent_contacts": {"username": {"id": "...", "display_name": "..."}},
   "channels": {"#channel-name": "C..."}
 }
@@ -207,6 +275,26 @@ Messages support Slack's mrkdwn format:
 - `` `code` `` for inline code
 - `<@USER_ID>` for user mentions
 - `<#CHANNEL_ID>` for channel mentions
+
+### Tables in Slack
+
+**IMPORTANT:** When including tables in Slack messages, always wrap them in triple backticks (code blocks). Slack uses a proportional font by default, so table columns won't align properly without monospace formatting.
+
+**Correct format:**
+```
+*Summary Title*
+
+\`\`\`
+| Metric      | Score |
+|-------------|-------|
+| Quality     | 4.5/5 |
+| Usefulness  | 4.2/5 |
+\`\`\`
+
+More text here...
+```
+
+**Why this matters:** Without code blocks, pipe characters and spacing won't align, making tables unreadable.
 
 ## Workflow 2: Read Recent Activity
 
@@ -316,9 +404,8 @@ After generating the digest, write `~/.claude/skills/slack/last-digest.json`:
 When user says "open 1.2" or "open message 2.1":
 
 1. Read `config.json` to get `link_style` preference
-2. Read `slack-cache.json` to get `workspace`
-3. Read `last-digest.json` and look up the message reference
-4. Generate permalink using the `permalink` command with the user's link_style:
+2. Read `last-digest.json` and look up the message reference (includes workspace)
+3. Generate permalink using the `permalink` command with the user's link_style:
    ```bash
    # For link_style: "app" (default)
    python3 $SCRIPT permalink "C04AFNMCNFP" "1736789100.654321" "hartreeworks" "app"

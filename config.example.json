@@ -1,6 +1,11 @@
 {
-  "xoxc_token": "xoxc-YOUR-XOXC-TOKEN-HERE",
-  "xoxd_token": "xoxd-YOUR-XOXD-TOKEN-HERE",
-  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "workspaces": {
+    "your-workspace": {
+      "xoxc_token": "xoxc-YOUR-XOXC-TOKEN-HERE",
+      "xoxd_token": "xoxd-YOUR-XOXD-TOKEN-HERE",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    }
+  },
+  "default_workspace": "your-workspace",
   "link_style": "app"
 }
