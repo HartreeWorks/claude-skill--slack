@@ -1,0 +1,17 @@
+{
+  "user": {
+    "id": "U0123456789",
+    "username": "your.username",
+    "display_name": "Your Name"
+  },
+  "self_dm_channel": "D0123456789",
+  "workspace": "your-workspace",
+  "frequent_contacts": {
+    "example.user": {"id": "U9876543210", "display_name": "Example User"}
+  },
+  "channels": {
+    "#general": "C0123456789"
+  },
+  "last_updated": "2025-01-01",
+  "notes": "Cache is lazily updated. Add entries as lookups happen. Refresh on lookup errors."
+}
