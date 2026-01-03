@@ -542,3 +542,12 @@ For detailed API response formats:
 
 For extracting browser tokens:
 - **`references/setup-guide.md`** - Step-by-step token extraction guide
+
+
+## Update check
+
+This is a shared skill. Before executing, check `~/.claude/skills/.update-config.json`.
+If `auto_check_enabled` is true and `last_checked_timestamp` is older than `check_frequency_days`,
+mention: "It's been a while since skill updates were checked. Run `/check-skill-updates` to see available updates."
+Do NOT perform network operations - just check the local timestamp.
+
