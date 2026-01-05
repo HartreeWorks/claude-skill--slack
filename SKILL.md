@@ -465,6 +465,97 @@ To retrieve messages the user sent during a specific period:
 | `from:@username has:link` | Messages containing links |
 | `from:@username has:reaction` | Messages with reactions |
 
+## Workflow 5: Export messages archive
+
+Export the user's sent messages with full thread context to a JSON file. Supports resume if interrupted.
+
+### Basic export
+
+```bash
+SCRIPT=~/.claude/skills/slack/scripts/slack_client.py
+
+# Export last 6 months of messages
+python3 $SCRIPT export --from 2025-07-01 --to 2026-01-05 --output ~/slack-export.json
+
+# Export for a specific workspace
+python3 $SCRIPT -w 80000hours export --from 2025-07-01 --to 2026-01-05 --output ~/slack-export.json
+```
+
+### Resume an interrupted export
+
+If the export is interrupted (Ctrl+C or error), resume from where it left off:
+
+```bash
+python3 $SCRIPT export --resume
+```
+
+### Check export status
+
+```bash
+python3 $SCRIPT export-status
+```
+
+### How it works
+
+The export runs in three phases:
+
+1. **Search phase**: Searches for all messages sent by the user in the date range using paginated search
+2. **Thread fetch phase**: For each thread the user participated in, fetches the complete thread (including messages from others) for context
+3. **Write phase**: Outputs a JSON file with all data
+
+### Rate limiting
+
+The export respects Slack's rate limits:
+- ~45 search requests per minute (Tier 3)
+- ~90 thread fetch requests per minute (Tier 4)
+- Automatic backoff if rate limited
+
+### Output format
+
+The JSON export contains:
+
+```json
+{
+  "metadata": {
+    "workspace": "80000hours",
+    "user": {"id": "U...", "username": "pete.hartree"},
+    "date_range": {"from": "2025-07-01", "to": "2026-01-05"},
+    "exported_at": "2026-01-05T12:00:00Z",
+    "stats": {
+      "total_messages": 2847,
+      "total_threads": 423,
+      "standalone_messages": 312,
+      "channels_count": 45
+    }
+  },
+  "channels": {
+    "C0123456789": {"id": "...", "name": "general", "type": "channel"}
+  },
+  "threads": [
+    {
+      "thread_id": "C0123456789:1735000000.111111",
+      "channel_id": "C0123456789",
+      "user_message_count": 3,
+      "total_message_count": 12,
+      "messages": [
+        {"ts": "...", "user": "U...", "text": "...", "is_user_message": true}
+      ]
+    }
+  ],
+  "standalone_messages": [
+    {"ts": "...", "channel_id": "...", "text": "...", "is_user_message": true}
+  ]
+}
+```
+
+### Scale estimates
+
+For 6 months of active usage:
+- ~3,000 messages → ~30 search API calls
+- ~800 unique threads → ~800 thread API calls
+- Total time: 15-30 minutes with rate limiting
+- Output file: 10-20 MB
+
 ## Working with Threads
 
 ### Fetch Thread Replies
