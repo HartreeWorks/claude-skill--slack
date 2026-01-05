@@ -28,11 +28,11 @@ class RateLimiter:
     Tier 3 (search.messages): ~50 req/min
     Tier 4 (conversations.replies): ~100 req/min
 
-    Uses conservative limits and exponential backoff on 429s.
+    Uses conservative limits to avoid ever hitting actual rate limits.
     """
 
-    TIER_3_LIMIT = 45  # search - leave buffer below 50
-    TIER_4_LIMIT = 90  # replies - leave buffer below 100
+    TIER_3_LIMIT = 35  # search - conservative to never hit 50
+    TIER_4_LIMIT = 70  # replies - conservative to never hit 100
 
     def __init__(self):
         self.tier3_calls = []  # timestamps of search calls
