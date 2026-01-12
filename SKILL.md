@@ -118,32 +118,33 @@ Guessing names from context is a **critical failure mode**. User IDs like `U7DTU
    ```bash
    python3 $SCRIPT -w <workspace> user-lookup
    ```
-   This returns a JSON mapping of user_id → display_name from the cache.
+   This returns a JSON mapping of user_id → display_name.
 
-2. **Check if cache is stale:** Look at `last_updated` in the response. If older than 7 days, refresh:
-   ```bash
-   python3 $SCRIPT -w <workspace> fetch-users
-   ```
+2. **Resolve all user IDs** in the content using the lookup before presenting to the user.
 
-3. **Resolve all user IDs** in the content using the lookup before presenting to the user.
+That's it - just two steps. The `user-lookup` command handles caching automatically:
+- **First time:** Fetches users from Slack API (may take a few seconds)
+- **Cache stale (>14 days):** Returns cached data immediately, refreshes in background
+- **Cache fresh:** Returns cached data instantly
 
 ### User Resolution Commands
 
 | Command | Purpose |
 |---------|---------|
-| `user-lookup` | Get cached user_id → display_name mapping (fast, no API call) |
-| `fetch-users` | Refresh the user cache from Slack API (use if cache is stale) |
+| `user-lookup` | Get user_id → display_name mapping (auto-fetches if empty, background-refreshes if stale) |
+| `fetch-users` | Force refresh the user cache from Slack API |
 
 ### Example
 
 ```bash
-# 1. Fetch a thread
-python3 $SCRIPT -w 80000hours replies "C039MDQ91" "1767837883.421009"
-# Returns messages with user IDs like "U02GYLM0A", "U7DTUK3U6"
-
-# 2. Get user lookup (BEFORE summarizing)
+# 1. Get user lookup FIRST (handles caching automatically)
 python3 $SCRIPT -w 80000hours user-lookup
 # Returns: {"U02GYLM0A": "Benjamin Todd", "U7DTUK3U6": "Niel", ...}
+# (First time: fetches from API. Later: uses cache, refreshes in background if >14 days old)
+
+# 2. Fetch a thread
+python3 $SCRIPT -w 80000hours replies "C039MDQ91" "1767837883.421009"
+# Returns messages with user IDs like "U02GYLM0A", "U7DTUK3U6"
 
 # 3. Now you can correctly attribute: "Benjamin Todd said..." not "User U02GYLM0A said..."
 ```
@@ -157,9 +158,8 @@ python3 $SCRIPT -w 80000hours user-lookup
 
 ### What To Do
 
-- ✅ Always run `user-lookup` before summarizing Slack content
-- ✅ Refresh cache with `fetch-users` if it's more than 7 days old
-- ✅ If a user ID isn't in the cache, either refresh or show the ID with a note
+- ✅ Always run `user-lookup` before summarizing Slack content (it handles caching automatically)
+- ✅ If a user ID isn't in the lookup, run `fetch-users` to force refresh, or show the ID with a note
 
 ---
 
@@ -174,8 +174,8 @@ The `scripts/slack_client.py` script provides these commands. All commands suppo
 | `auth` | - | Test authentication, get user info |
 | `channels` | [types] | List channels (default: all types) |
 | `users` | - | List all workspace users |
-| `user-lookup` | - | Get cached user_id → display_name mapping (no API call) |
-| `fetch-users` | - | Refresh user cache from Slack API |
+| `user-lookup` | - | Get user_id → display_name mapping (auto-fetches/refreshes as needed) |
+| `fetch-users` | - | Force refresh user cache from Slack API |
 | `history` | channel_id [limit] | Get message history |
 | `replies` | channel_id thread_ts | Get thread replies |
 | `search` | query [count] | Search messages |

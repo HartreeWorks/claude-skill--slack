@@ -10,9 +10,13 @@ import sys
 import time
 import uuid
 import re
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
+
+# Cache staleness threshold
+USER_CACHE_STALE_DAYS = 14
 
 SKILL_ROOT = Path(__file__).parent.parent
 CONFIG_PATH = SKILL_ROOT / "config.json"
@@ -435,6 +439,46 @@ def get_user_lookup(workspace: str) -> dict:
         lookup[cache["user"]["id"]] = cache["user"].get("display_name") or cache["user"].get("username")
 
     return lookup
+
+
+def is_user_cache_empty(workspace: str) -> bool:
+    """Check if user cache is empty or missing."""
+    cache = load_cache(workspace)
+    users = cache.get("users", {})
+    return len(users) == 0
+
+
+def is_user_cache_stale(workspace: str) -> bool:
+    """Check if user cache is stale (older than USER_CACHE_STALE_DAYS)."""
+    cache = load_cache(workspace)
+    last_updated = cache.get("users_last_updated")
+
+    if not last_updated:
+        return True
+
+    try:
+        updated_dt = datetime.fromisoformat(last_updated)
+        age = datetime.now() - updated_dt
+        return age > timedelta(days=USER_CACHE_STALE_DAYS)
+    except (ValueError, TypeError):
+        return True
+
+
+def trigger_background_user_refresh(workspace: str):
+    """
+    Trigger a background refresh of the user cache.
+    Runs fetch-users in a detached subprocess.
+    """
+    script_path = Path(__file__).resolve()
+    cmd = [sys.executable, str(script_path), "-w", workspace, "fetch-users"]
+
+    # Run detached - don't wait for completion
+    subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
 
 
 # ==================== Export State Management ====================
@@ -972,12 +1016,37 @@ def main():
         return
 
     if command == "user-lookup":
-        # Get user lookup without making API calls
+        # Get user lookup with stale-while-revalidate pattern:
+        # - Empty cache: fetch synchronously (first-time setup)
+        # - Stale cache (>14 days): return stale data, refresh in background
+        # - Fresh cache: return cached data
         try:
-            _, ws_name = load_config(workspace_arg)
+            creds, ws_name = load_config(workspace_arg)
         except Exception:
             print(json.dumps({"error": "No workspace configured"}))
             sys.exit(1)
+
+        cache_empty = is_user_cache_empty(ws_name)
+        cache_stale = is_user_cache_stale(ws_name)
+        refreshing = False
+
+        if cache_empty:
+            # First time - must fetch synchronously
+            print(f"User cache empty. Fetching users from {ws_name}...", file=sys.stderr)
+            try:
+                client = SlackClient(
+                    creds["xoxc_token"],
+                    creds["xoxd_token"],
+                    creds.get("user_agent")
+                )
+                fetch_and_cache_users(client, ws_name)
+            except Exception as e:
+                print(json.dumps({"error": f"Failed to fetch users: {e}"}))
+                sys.exit(1)
+        elif cache_stale:
+            # Stale - return cached data, refresh in background
+            trigger_background_user_refresh(ws_name)
+            refreshing = True
 
         lookup = get_user_lookup(ws_name)
         cache = load_cache(ws_name)
@@ -988,6 +1057,8 @@ def main():
             "last_updated": cache.get("users_last_updated"),
             "users": lookup
         }
+        if refreshing:
+            result["refreshing_in_background"] = True
         print(json.dumps(result, indent=2))
         return
 
