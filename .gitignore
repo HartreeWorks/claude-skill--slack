@@ -6,3 +6,4 @@ last-digest.json
 
 # Copy from example files to get started:
 #   cp config.example.json config.json
+__pycache__/
