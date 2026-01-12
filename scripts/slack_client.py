@@ -317,13 +317,18 @@ def load_cache(workspace: str) -> dict:
     cache_path = get_cache_path(workspace)
     if cache_path.exists():
         with open(cache_path) as f:
-            return json.load(f)
+            cache = json.load(f)
+            # Ensure users section exists
+            if "users" not in cache:
+                cache["users"] = {}
+            return cache
     return {
         "user": None,
         "self_dm_channel": None,
         "workspace": workspace,
         "frequent_contacts": {},
         "channels": {},
+        "users": {},  # user_id -> {display_name, username, real_name}
         "last_updated": None
     }
 
@@ -333,6 +338,103 @@ def save_cache(workspace: str, cache: dict):
     cache_path = get_cache_path(workspace)
     with open(cache_path, "w") as f:
         json.dump(cache, f, indent=2)
+
+
+def fetch_and_cache_users(client: 'SlackClient', workspace: str) -> dict:
+    """
+    Fetch all users from Slack and update the cache.
+
+    Returns:
+        dict with stats about the update
+    """
+    cache = load_cache(workspace)
+    if "users" not in cache:
+        cache["users"] = {}
+
+    existing_count = len(cache["users"])
+    new_count = 0
+    updated_count = 0
+
+    # Fetch users (may need pagination for large workspaces)
+    cursor = None
+    while True:
+        data = {"limit": "200"}
+        if cursor:
+            data["cursor"] = cursor
+
+        result = client._post("users.list", data)
+
+        if not result.get("ok"):
+            raise Exception(f"Failed to fetch users: {result.get('error')}")
+
+        members = result.get("members", [])
+
+        for user in members:
+            user_id = user.get("id")
+            if not user_id:
+                continue
+
+            # Skip bots and deleted users
+            if user.get("is_bot") or user.get("deleted"):
+                continue
+
+            profile = user.get("profile", {})
+            user_data = {
+                "username": user.get("name", ""),
+                "display_name": profile.get("display_name") or profile.get("real_name") or user.get("name", ""),
+                "real_name": profile.get("real_name", ""),
+                "first_name": profile.get("first_name", ""),
+            }
+
+            if user_id in cache["users"]:
+                # Check if anything changed
+                if cache["users"][user_id] != user_data:
+                    cache["users"][user_id] = user_data
+                    updated_count += 1
+            else:
+                cache["users"][user_id] = user_data
+                new_count += 1
+
+        # Check for more pages
+        cursor = result.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+
+    cache["users_last_updated"] = datetime.now().isoformat()
+    save_cache(workspace, cache)
+
+    return {
+        "total_users": len(cache["users"]),
+        "new": new_count,
+        "updated": updated_count,
+        "previously_cached": existing_count
+    }
+
+
+def get_user_lookup(workspace: str) -> dict:
+    """
+    Get a user ID to display name lookup from the cache.
+
+    Returns:
+        dict mapping user_id -> display_name
+    """
+    cache = load_cache(workspace)
+    lookup = {}
+
+    # Add from users cache
+    for user_id, user_data in cache.get("users", {}).items():
+        lookup[user_id] = user_data.get("display_name") or user_data.get("username") or user_id
+
+    # Add from frequent_contacts (for backwards compatibility)
+    for username, contact in cache.get("frequent_contacts", {}).items():
+        if "id" in contact and "display_name" in contact:
+            lookup[contact["id"]] = contact["display_name"]
+
+    # Add self
+    if cache.get("user") and cache["user"].get("id"):
+        lookup[cache["user"]["id"]] = cache["user"].get("display_name") or cache["user"].get("username")
+
+    return lookup
 
 
 # ==================== Export State Management ====================
@@ -653,6 +755,9 @@ def _infer_channel_type(channel_id: str) -> str:
 
 def _write_export_file(state: dict, workspace: str):
     """Write the final export JSON file."""
+    # Get user lookup from cache
+    user_lookup = get_user_lookup(workspace)
+
     output = {
         "metadata": {
             "export_id": state["export_id"],
@@ -674,6 +779,7 @@ def _write_export_file(state: dict, workspace: str):
                 "api_calls": state["stats"]["api_calls"]
             }
         },
+        "users": user_lookup,  # Include user ID -> display name mapping
         "channels": state["data"]["channels"],
         "threads": state["data"]["threads"],
         "standalone_messages": state["data"]["standalone_messages"]
@@ -794,7 +900,9 @@ def main():
                 "switch": "Switch active workspace (workspace_name)",
                 "add-workspace": "Add a new workspace (name, xoxc, xoxd, optional: user_agent)",
                 "export": "Export messages (--from DATE --to DATE --output FILE [--resume])",
-                "export-status": "Check export status"
+                "export-status": "Check export status",
+                "fetch-users": "Fetch and cache all workspace users",
+                "user-lookup": "Get user ID to name lookup from cache"
             }
         }, indent=2))
         sys.exit(1)
@@ -861,6 +969,49 @@ def main():
         save_config(config)
         result = {"ok": True, "added": name, "workspaces": list(config["workspaces"].keys())}
         print(json.dumps(result, indent=2))
+        return
+
+    if command == "user-lookup":
+        # Get user lookup without making API calls
+        try:
+            _, ws_name = load_config(workspace_arg)
+        except Exception:
+            print(json.dumps({"error": "No workspace configured"}))
+            sys.exit(1)
+
+        lookup = get_user_lookup(ws_name)
+        cache = load_cache(ws_name)
+        result = {
+            "ok": True,
+            "workspace": ws_name,
+            "user_count": len(lookup),
+            "last_updated": cache.get("users_last_updated"),
+            "users": lookup
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    if command == "fetch-users":
+        try:
+            creds, ws_name = load_config(workspace_arg)
+            client = SlackClient(
+                creds["xoxc_token"],
+                creds["xoxd_token"],
+                creds.get("user_agent")
+            )
+
+            print(f"Fetching users from {ws_name}...", file=sys.stderr)
+            stats = fetch_and_cache_users(client, ws_name)
+            result = {
+                "ok": True,
+                "workspace": ws_name,
+                **stats
+            }
+            print(json.dumps(result, indent=2))
+
+        except Exception as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
         return
 
     if command == "export-status":

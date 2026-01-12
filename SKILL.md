@@ -1,6 +1,6 @@
 ---
 name: slack
-description: This skill should be used when the user asks to "send a Slack message", "post to Slack", "DM someone on Slack", "reply to a thread", "check Slack notifications", "read my Slack messages", "what did I miss on Slack", "get my sent messages", "search Slack history", "find messages I sent", "give me a Slack digest", "Slack activity summary", "what happened on Slack last week", "what did I do on Slack", or mentions Slack messaging, notifications, or message history. Handles sending messages, reading notifications, generating activity digests, and searching message history via a Python client.
+description: This skill should be used when the user asks to send Slack messages, check notifications, get a Slack digest, or search message history. Supports multiple workspaces.
 ---
 
 # Slack Integration Skill
@@ -102,6 +102,67 @@ The `user_agent` is optional when adding subsequent workspaces (defaults to firs
 python3 ~/.claude/skills/slack/scripts/slack_client.py auth
 ```
 
+## CRITICAL: User ID Resolution
+
+**Slack API returns user IDs (e.g., `U02GYLM0A`), NOT display names.** You MUST resolve these IDs to names before presenting any Slack content to the user.
+
+### Why This Matters
+
+Guessing names from context is a **critical failure mode**. User IDs like `U7DTUK3U6` give no indication of who the person is. If you summarize a thread and attribute quotes to the wrong people, you're spreading misinformation.
+
+### Mandatory Workflow
+
+**Before summarizing ANY Slack content containing user IDs (threads, messages, search results):**
+
+1. **Get the user lookup for the workspace:**
+   ```bash
+   python3 $SCRIPT -w <workspace> user-lookup
+   ```
+   This returns a JSON mapping of user_id → display_name from the cache.
+
+2. **Check if cache is stale:** Look at `last_updated` in the response. If older than 7 days, refresh:
+   ```bash
+   python3 $SCRIPT -w <workspace> fetch-users
+   ```
+
+3. **Resolve all user IDs** in the content using the lookup before presenting to the user.
+
+### User Resolution Commands
+
+| Command | Purpose |
+|---------|---------|
+| `user-lookup` | Get cached user_id → display_name mapping (fast, no API call) |
+| `fetch-users` | Refresh the user cache from Slack API (use if cache is stale) |
+
+### Example
+
+```bash
+# 1. Fetch a thread
+python3 $SCRIPT -w 80000hours replies "C039MDQ91" "1767837883.421009"
+# Returns messages with user IDs like "U02GYLM0A", "U7DTUK3U6"
+
+# 2. Get user lookup (BEFORE summarizing)
+python3 $SCRIPT -w 80000hours user-lookup
+# Returns: {"U02GYLM0A": "Benjamin Todd", "U7DTUK3U6": "Niel", ...}
+
+# 3. Now you can correctly attribute: "Benjamin Todd said..." not "User U02GYLM0A said..."
+```
+
+### What NOT To Do
+
+- ❌ Guess names based on context clues in messages
+- ❌ Assume you know who someone is from their writing style
+- ❌ Present a summary with user IDs instead of names
+- ❌ Skip the lookup step because "it's just one message"
+
+### What To Do
+
+- ✅ Always run `user-lookup` before summarizing Slack content
+- ✅ Refresh cache with `fetch-users` if it's more than 7 days old
+- ✅ If a user ID isn't in the cache, either refresh or show the ID with a note
+
+---
+
 ## Python Client Commands
 
 The `scripts/slack_client.py` script provides these commands. All commands support an optional `-w <workspace>` flag to specify the workspace.
@@ -113,6 +174,8 @@ The `scripts/slack_client.py` script provides these commands. All commands suppo
 | `auth` | - | Test authentication, get user info |
 | `channels` | [types] | List channels (default: all types) |
 | `users` | - | List all workspace users |
+| `user-lookup` | - | Get cached user_id → display_name mapping (no API call) |
+| `fetch-users` | - | Refresh user cache from Slack API |
 | `history` | channel_id [limit] | Get message history |
 | `replies` | channel_id thread_ts | Get thread replies |
 | `search` | query [count] | Search messages |
