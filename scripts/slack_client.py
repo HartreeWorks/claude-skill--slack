@@ -21,6 +21,7 @@ USER_CACHE_STALE_DAYS = 14
 SKILL_ROOT = Path(__file__).parent.parent
 CONFIG_PATH = SKILL_ROOT / "config.json"
 SESSION_STATE_PATH = SKILL_ROOT / "session-state.json"
+DIGEST_CONFIG_PATH = SKILL_ROOT / "digest-config.json"
 
 
 # ==================== Rate Limiter ====================
@@ -588,7 +589,7 @@ def run_export(client: 'SlackClient', workspace: str, from_date: str, to_date: s
     try:
         # ===== PHASE 1: Search for user's messages =====
         if state["status"] == "searching":
-            query = f"from:@{username} after:{from_date} before:{to_date}"
+            query = f"from:{username} after:{from_date} before:{to_date}"
             page = state["search_progress"]["current_page"]
 
             print(f"Phase 1: Searching for messages...", file=sys.stderr)
@@ -836,6 +837,276 @@ def _write_export_file(state: dict, workspace: str):
         json.dump(output, f, indent=2)
 
 
+# ==================== Digest Functions ====================
+
+def load_digest_config() -> dict:
+    """Load the digest configuration."""
+    if not DIGEST_CONFIG_PATH.exists():
+        return {
+            "workspaces": {},
+            "lookback_hours": 14,
+            "output_dir": str(SKILL_ROOT / "digests")
+        }
+    with open(DIGEST_CONFIG_PATH) as f:
+        return json.load(f)
+
+
+def run_digest(workspace: str = None) -> dict:
+    """
+    Generate an overnight digest for one or all workspaces.
+
+    Returns a structured digest with:
+    - mentions: Messages mentioning the user
+    - replies: Replies to user's recent messages
+    - channel_activity: Summary of channel activity
+
+    Args:
+        workspace: Specific workspace to digest, or None for all configured workspaces
+    """
+    digest_config = load_digest_config()
+    full_config = load_full_config()
+    lookback_hours = digest_config.get("lookback_hours", 14)
+
+    # Calculate time range
+    now = datetime.now()
+    from_time = now - timedelta(hours=lookback_hours)
+
+    # Convert to Slack search date format (YYYY-MM-DD)
+    # Slack's "after:" filter is day-granularity, so we search from a day earlier
+    # and filter precisely in code
+    search_start = from_time - timedelta(days=1)
+    search_date = search_start.strftime("%Y-%m-%d")
+
+    result = {
+        "generated": now.isoformat(),
+        "period": {
+            "from": from_time.isoformat(),
+            "to": now.isoformat(),
+            "lookback_hours": lookback_hours
+        },
+        "summary": {
+            "total_mentions": 0,
+            "total_replies": 0
+        },
+        "mentions": [],
+        "replies": []
+    }
+
+    # Determine which workspaces to process
+    if workspace:
+        workspaces_to_process = [workspace]
+    else:
+        workspaces_to_process = list(digest_config.get("workspaces", {}).keys())
+
+    if not workspaces_to_process:
+        # Fall back to all configured workspaces in main config
+        workspaces_to_process = list(full_config.get("workspaces", {}).keys())
+
+    rate_limiter = RateLimiter()
+    seen_message_ids = set()  # For deduplication
+
+    for ws_name in workspaces_to_process:
+        if ws_name not in full_config.get("workspaces", {}):
+            print(f"  Skipping unknown workspace: {ws_name}", file=sys.stderr)
+            continue
+
+        print(f"Processing workspace: {ws_name}", file=sys.stderr)
+
+        try:
+            creds = full_config["workspaces"][ws_name]
+            client = SlackClient(
+                creds["xoxc_token"],
+                creds["xoxd_token"],
+                creds.get("user_agent")
+            )
+
+            # Get current user info
+            auth_result = client.auth_test()
+            if not auth_result.get("ok"):
+                print(f"  Auth failed for {ws_name}: {auth_result.get('error')}", file=sys.stderr)
+                continue
+
+            user_id = auth_result.get("user_id")
+            username = auth_result.get("user")
+
+            # Get user lookup for name resolution
+            user_lookup = get_user_lookup(ws_name)
+
+            ws_config = digest_config.get("workspaces", {}).get(ws_name, {})
+
+            # 1. Search for mentions of this user
+            if ws_config.get("include_mentions", True):
+                print(f"  Searching for mentions...", file=sys.stderr)
+                rate_limiter.wait_for_tier3()
+
+                # Search for @mentions
+                mention_query = f"<@{user_id}> after:{search_date}"
+                mention_result = client.search_messages(mention_query, count=50)
+
+                if mention_result.get("ok"):
+                    matches = mention_result.get("messages", {}).get("matches", [])
+                    for msg in matches:
+                        msg_id = f"{msg.get('channel', {}).get('id')}:{msg.get('ts')}"
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)
+
+                        # Skip if it's the user's own message
+                        if msg.get("user") == user_id or msg.get("username") == username:
+                            continue
+
+                        sender_id = msg.get("user") or msg.get("username")
+                        sender_name = user_lookup.get(sender_id, sender_id)
+                        channel_info = msg.get("channel", {})
+
+                        # Get text from message, falling back to blocks if text is empty
+                        msg_text = msg.get("text", "")
+                        if not msg_text.strip():
+                            # Try to get text from blocks (used by bots/apps)
+                            blocks = msg.get("blocks", [])
+                            for block in blocks:
+                                if block.get("type") == "section":
+                                    block_text = block.get("text", {})
+                                    if isinstance(block_text, dict):
+                                        msg_text = block_text.get("text", "")
+                                    else:
+                                        msg_text = str(block_text)
+                                    if msg_text:
+                                        break
+
+                        result["mentions"].append({
+                            "workspace": ws_name,
+                            "channel": channel_info.get("name", "unknown"),
+                            "channel_id": channel_info.get("id"),
+                            "from": sender_name,
+                            "from_id": sender_id,
+                            "text": msg_text[:500],  # Truncate long messages
+                            "ts": msg.get("ts"),
+                            "permalink": msg.get("permalink")
+                        })
+                        result["summary"]["total_mentions"] += 1
+
+            # 2. Search for thread activity where user participated
+            # This covers threads user started OR replied to
+            print(f"  Searching for thread activity...", file=sys.stderr)
+
+            # Find threads user participated in by searching for their messages
+            rate_limiter.wait_for_tier3()
+            user_msg_query = f"from:{username} after:{search_date}"
+            user_msg_result = client.search_messages(user_msg_query, count=50)
+
+            threads_checked = set()
+
+            if user_msg_result.get("ok"):
+                user_messages = user_msg_result.get("messages", {}).get("matches", [])
+
+                for msg in user_messages:
+                    # Get thread_ts - either this message is in a thread, or it started one
+                    thread_ts = msg.get("thread_ts") or msg.get("ts")
+                    channel_id = msg.get("channel", {}).get("id")
+                    channel_name = msg.get("channel", {}).get("name", "unknown")
+
+                    if not channel_id or not thread_ts:
+                        continue
+
+                    thread_key = f"{channel_id}:{thread_ts}"
+                    if thread_key in threads_checked:
+                        continue
+                    threads_checked.add(thread_key)
+
+                    # Fetch the full thread
+                    rate_limiter.wait_for_tier4()
+                    replies_result = client.conversations_replies(channel_id, thread_ts)
+
+                    if not replies_result.get("ok"):
+                        continue
+
+                    thread_messages = replies_result.get("messages", [])
+
+                    # Find user's last message timestamp in this thread
+                    user_last_ts = 0
+                    for tmsg in thread_messages:
+                        if tmsg.get("user") == user_id:
+                            user_last_ts = max(user_last_ts, float(tmsg.get("ts", 0)))
+
+                    # Find all recent messages from others in this thread
+                    for tmsg in thread_messages:
+                        if tmsg.get("user") == user_id:
+                            continue  # Skip user's own messages
+
+                        tmsg_ts = float(tmsg.get("ts", 0))
+
+                        # Only include if within lookback period
+                        msg_time = datetime.fromtimestamp(tmsg_ts)
+                        if msg_time < from_time:
+                            continue
+
+                        msg_id = f"{channel_id}:{tmsg.get('ts')}"
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)
+
+                        sender_id = tmsg.get("user")
+                        sender_name = user_lookup.get(sender_id, sender_id)
+                        msg_text = tmsg.get("text", "")
+
+                        # Skip empty/system messages
+                        if not msg_text.strip():
+                            continue
+                        if " has joined the channel" in msg_text or " has left the channel" in msg_text:
+                            continue
+
+                        result["replies"].append({
+                            "workspace": ws_name,
+                            "channel": channel_name,
+                            "channel_id": channel_id,
+                            "from": sender_name,
+                            "from_id": sender_id,
+                            "text": msg_text[:500],
+                            "ts": tmsg.get("ts"),
+                            "thread_ts": thread_ts
+                        })
+                        result["summary"]["total_replies"] += 1
+
+            # Note: Channel activity scanning removed - focus on mentions and thread replies
+            # which mirrors Slack's Activity screen behaviour
+
+        except Exception as e:
+            print(f"  Error processing {ws_name}: {e}", file=sys.stderr)
+            continue
+
+    return result
+
+
+def write_digest_output(digest: dict, output_dir: str = None) -> str:
+    """
+    Write the digest to a JSON file.
+
+    Args:
+        digest: The digest data
+        output_dir: Directory to write to (defaults to digest config)
+
+    Returns:
+        Path to the written file
+    """
+    if not output_dir:
+        digest_config = load_digest_config()
+        output_dir = digest_config.get("output_dir", str(SKILL_ROOT / "digests"))
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Generate filename with date
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    filename = f"slack-digest-{date_str}.json"
+    filepath = output_path / filename
+
+    with open(filepath, "w") as f:
+        json.dump(digest, f, indent=2)
+
+    return str(filepath)
+
+
 # ==================== Config Management ====================
 
 def load_full_config() -> dict:
@@ -946,7 +1217,9 @@ def main():
                 "export": "Export messages (--from DATE --to DATE --output FILE [--resume])",
                 "export-status": "Check export status",
                 "fetch-users": "Fetch and cache all workspace users",
-                "user-lookup": "Get user ID to name lookup from cache"
+                "user-lookup": "Get user ID to name lookup from cache",
+                "digest": "Generate overnight digest (mentions, replies, channel activity)",
+                "digest-config": "Show current digest configuration"
             }
         }, indent=2))
         sys.exit(1)
@@ -1077,6 +1350,49 @@ def main():
                 "ok": True,
                 "workspace": ws_name,
                 **stats
+            }
+            print(json.dumps(result, indent=2))
+
+        except Exception as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
+        return
+
+    if command == "digest-config":
+        config = load_digest_config()
+        print(json.dumps(config, indent=2))
+        return
+
+    if command == "digest":
+        # Parse digest-specific arguments
+        output_file = None
+        i = 0
+        while i < len(cmd_args):
+            if cmd_args[i] == "--output" and i + 1 < len(cmd_args):
+                output_file = cmd_args[i + 1]
+                i += 2
+            else:
+                i += 1
+
+        try:
+            print("Generating Slack digest...", file=sys.stderr)
+            digest = run_digest(workspace=workspace_arg)
+
+            # Write to file
+            if output_file:
+                output_path = output_file
+            else:
+                digest_config = load_digest_config()
+                output_path = write_digest_output(digest)
+
+            print(f"Digest written to: {output_path}", file=sys.stderr)
+
+            # Output summary to stdout
+            result = {
+                "ok": True,
+                "output_file": output_path,
+                "summary": digest["summary"],
+                "period": digest["period"]
             }
             print(json.dumps(result, indent=2))
 
