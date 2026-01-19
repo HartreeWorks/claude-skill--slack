@@ -886,6 +886,7 @@ def run_digest(workspace: str = None) -> dict:
         },
         "summary": {
             "total_mentions": 0,
+            "unhandled_mentions": 0,  # Mentions user hasn't replied to yet
             "total_replies": 0
         },
         "mentions": [],
@@ -958,6 +959,25 @@ def run_digest(workspace: str = None) -> dict:
                         sender_id = msg.get("user") or msg.get("username")
                         sender_name = user_lookup.get(sender_id, sender_id)
                         channel_info = msg.get("channel", {})
+                        mention_ts = float(msg.get("ts", 0))
+
+                        # Check if user has already replied to this thread
+                        user_replied = False
+                        thread_ts = msg.get("thread_ts") or msg.get("ts")
+                        channel_id = channel_info.get("id")
+
+                        if channel_id and thread_ts:
+                            # Fetch the thread to check for user's reply
+                            rate_limiter.wait_for_tier4()
+                            thread_result = client.conversations_replies(channel_id, thread_ts)
+                            if thread_result.get("ok"):
+                                thread_messages = thread_result.get("messages", [])
+                                for tmsg in thread_messages:
+                                    if tmsg.get("user") == user_id:
+                                        reply_ts = float(tmsg.get("ts", 0))
+                                        if reply_ts > mention_ts:
+                                            user_replied = True
+                                            break
 
                         # Get text from message, falling back to blocks if text is empty
                         msg_text = msg.get("text", "")
@@ -977,14 +997,17 @@ def run_digest(workspace: str = None) -> dict:
                         result["mentions"].append({
                             "workspace": ws_name,
                             "channel": channel_info.get("name", "unknown"),
-                            "channel_id": channel_info.get("id"),
+                            "channel_id": channel_id,
                             "from": sender_name,
                             "from_id": sender_id,
                             "text": msg_text[:500],  # Truncate long messages
                             "ts": msg.get("ts"),
-                            "permalink": msg.get("permalink")
+                            "permalink": msg.get("permalink"),
+                            "handled": user_replied  # True if user already replied after this mention
                         })
                         result["summary"]["total_mentions"] += 1
+                        if not user_replied:
+                            result["summary"]["unhandled_mentions"] += 1
 
             # 2. Search for thread activity where user participated
             # This covers threads user started OR replied to
