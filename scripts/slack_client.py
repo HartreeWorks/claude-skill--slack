@@ -930,6 +930,11 @@ def run_digest(workspace: str = None) -> dict:
             user_id = auth_result.get("user_id")
             username = auth_result.get("user")
 
+            # Ensure user cache is populated before looking up names
+            if is_user_cache_empty(ws_name):
+                print(f"  User cache empty. Fetching users from {ws_name}...", file=sys.stderr)
+                fetch_and_cache_users(client, ws_name)
+
             # Get user lookup for name resolution
             user_lookup = get_user_lookup(ws_name)
 
