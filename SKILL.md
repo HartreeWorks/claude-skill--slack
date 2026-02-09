@@ -696,9 +696,3 @@ For detailed API response formats:
 
 For extracting browser tokens:
 - **`references/setup-guide.md`** - Step-by-step token extraction guide
-
-
-## Update check
-
-This skill is managed by [skills.sh](https://skills.sh). To check for updates, run `npx skills update`.
-
